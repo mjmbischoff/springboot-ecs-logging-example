@@ -1,0 +1,176 @@
+# For more information https://www.elastic.co/guide/en/fleet/current/running-on-kubernetes-standalone.html
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sidecard-config
+  namespace: basic-example
+  labels:
+    k8s-app: elastic-agent-standalone
+data:
+  agent.yml: |-
+    outputs:
+      default:
+        type: elasticsearch
+        hosts:
+          - >-
+            ${ES_HOST}
+        username: ${ES_USERNAME}
+        password: ${ES_PASSWORD}
+    agent:
+      monitoring:
+        enabled: false
+        use_output: default
+        logs: true
+        metrics: true
+    providers:
+      kubernetes:
+        node: ${NODE_NAME}
+        scope: node
+      kubernetes_leaderelection:
+        enabled: false
+    inputs:
+      - id: system-logs
+        type: logfile
+        use_output: default
+        meta:
+          package:
+            name: system
+            version: 1.20.4
+        data_stream:
+          namespace: default
+        streams:
+          - data_stream:
+              dataset: springbootdemo-logback-logging-ecs.logs
+              type: logs
+            paths:
+              - /var/log/spring-boot-application*.log
+            exclude_files:
+              - .gz$
+            processors:
+              - add_locale: null
+            ignore_older: 72h
+            parsers:
+              - ndjson:
+                overwrite_keys: true
+                add_error_key: true
+                expand_keys: true
+  logback.xml: |-
+    <?xml version="1.0" encoding="UTF-8"?>
+    <configuration>
+      <include resource="org/springframework/boot/logging/logback/console-appender.xml" />
+      <appender name="FILE-ROLLING" class="ch.qos.logback.core.rolling.RollingFileAppender">
+          <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+              <fileNamePattern>/var/log/spring-boot-application.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+              <!-- each archived file, size max 10MB -->
+              <maxFileSize>10MB</maxFileSize>
+              <!-- total size of all archive files, if total size > totalSizeCap, it will delete old archived file -->
+              <totalSizeCap>450MB</totalSizeCap>
+              <!-- 4 days to keep -->
+              <maxHistory>4</maxHistory>
+          </rollingPolicy>
+
+          <encoder class="co.elastic.logging.logback.EcsEncoder">
+              <serviceName>springbootdemo-logback-logging-ecs</serviceName>
+              <serviceEnvironment>test</serviceEnvironment>
+          </encoder>
+      </appender>
+      <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE-ROLLING" />
+      </root>
+    </configuration>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: springbootdemo-logback-logging-ecs-deployment
+  namespace: basic-example
+  labels:
+    app: springbootdemo-logback-logging-ecs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: springbootdemo-logback-logging-ecs
+  template:
+    metadata:
+      labels:
+        app: springbootdemo-logback-logging-ecs
+    spec:
+      containers:
+        - name: springbootdemo-logback-logging-ecs
+          image: mjmbischoff/springbootdemo-logback-logging-ecs
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LOGGING_CONFIG
+              value: /logback.xml
+          resources:
+            limits:
+              memory: 700Mi
+              cpu: 100m
+            requests:
+              cpu: 100m
+              memory: 400Mi
+          volumeMounts:
+            - name: config-logback
+              mountPath:  /logback.xml
+              readOnly: true
+              subPath: logback.xml
+            - name: varlog
+              mountPath: /var/log
+        - name: elastic-agent-sidecar
+          image: docker.elastic.co/beats/elastic-agent:8.3.0
+          args: [
+              "-c", "/etc/elastic-agent/agent.yml",
+              "-e",
+          ]
+          env:
+            # The basic authentication username used to connect to Elasticsearch
+            # This user needs the privileges required to publish events to Elasticsearch.
+            - name: ES_USERNAME
+              value: "elastic"
+            # The basic authentication password used to connect to Elasticsearch
+            - name: ES_PASSWORD
+              value: "changeme"
+            # The Elasticsearch host to communicate with
+            - name: ES_HOST
+              value: "https://foo.es.region.cloudprovider.elastic-cloud.com:443"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: STATE_PATH
+              value: "/etc/elastic-agent"
+          securityContext:
+            runAsUser: 0
+          resources:
+            limits:
+              memory: 700Mi
+              cpu: 100m
+            requests:
+              cpu: 100m
+              memory: 400Mi
+          volumeMounts:
+            - name: config-agent
+              mountPath: /etc/elastic-agent/agent.yml
+              readOnly: true
+              subPath: agent.yml
+            - name: varlog
+              mountPath: /var/log
+      volumes:
+        - name: config-agent
+          configMap:
+            defaultMode: 0640
+            name: agent-sidecard-config
+        - name: config-logback
+          configMap:
+            defaultMode: 0644
+            name: agent-sidecard-config
+        - name: varlog
+          emptyDir:
+            sizeLimit: 500Mi
